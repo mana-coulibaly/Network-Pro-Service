@@ -17,7 +17,7 @@ export default function CurrentCallsPage() {
 
             const list = await api("/tickets?mine=1");
 
-            // 👉 ne garder que les tickets fermés
+            // ne garder que les tickets fermés
             const clos = (list || []).filter((t) => t.status === "clos");
 
             setTickets(clos);

@@ -64,34 +64,67 @@ app.post('/auth/register', async (req, res) => {
 // LOGIN
 app.post('/auth/login', async (req, res) => {
     try {
-    const { email, password } = req.body || {};
-    const q = await pool.query(
-        `select id, email, role, password_hash, coalesce(is_active,true) as is_active
-        from users where email=$1`,
+        const { email, password } = req.body || {};
+
+        const q = await pool.query(
+        `select
+            id,
+            email,
+            role,
+            password_hash,
+            first_name,
+            last_name,
+            coalesce(is_active,true) as is_active
+        from users
+        where email = $1`,
         [email?.toLowerCase()]
-    );
-    const u = q.rows[0];
-    if (!u || !u.is_active) return res.status(401).json({ error: 'invalid credentials' });
+        );
 
-    const ok = await bcrypt.compare(password || '', u.password_hash || '');
-    if (!ok) return res.status(401).json({ error: 'invalid credentials' });
+        const u = q.rows[0];
+        if (!u || !u.is_active) {
+        return res.status(401).json({ error: 'invalid credentials' });
+        }
 
-    const access = jwt.sign({ sub: u.id, role: u.role }, process.env.JWT_SECRET, { expiresIn: process.env.JWT_EXPIRES || '15m' });
-    const refresh = jwt.sign({ sub: u.id }, process.env.JWT_SECRET, { expiresIn: process.env.REFRESH_EXPIRES || '30d' });
+        const ok = await bcrypt.compare(password || '', u.password_hash || '');
+        if (!ok) {
+        return res.status(401).json({ error: 'invalid credentials' });
+        }
 
-    res.cookie('refresh', refresh, {
-        httpOnly: true, sameSite: 'lax',
+        const access = jwt.sign(
+        { sub: u.id, role: u.role },
+        process.env.JWT_SECRET,
+        { expiresIn: process.env.JWT_EXPIRES || '15m' }
+        );
+        const refresh = jwt.sign(
+        { sub: u.id },
+        process.env.JWT_SECRET,
+        { expiresIn: process.env.REFRESH_EXPIRES || '30d' }
+        );
+
+        res.cookie('refresh', refresh, {
+        httpOnly: true,
+        sameSite: 'lax',
         secure: process.env.NODE_ENV === 'production',
-        maxAge: 1000*60*60*24*30
-    });
+        maxAge: 1000 * 60 * 60 * 24 * 30,
+        });
 
-    res.json({ access, user: { id: u.id, email: u.email, role: u.role } });
-    }
-    catch (err) {
+        // renvoyer aussi user info si besoin
+        res.json({
+        access,
+        user: {
+            id: u.id,
+            email: u.email,
+            role: u.role,
+            first_name: u.first_name,
+            last_name: u.last_name,
+        },
+        });
+    } catch (err) {
         console.error('login error:', err);
         res.status(500).json({ error: 'fail_login' });
     }
 });
+
 
 
 // LOGOUT
@@ -658,7 +691,7 @@ app.post('/tickets/:id/odometer', requireAuth, requireRole('tech'), async (req, 
 
 app.patch('/tickets/:id/status', requireAuth, requireRole('tech'), async (req, res) => {
     const { id } = req.params;
-    const { status } = req.body || {};
+    const { status, description } = req.body || {};   // <- on récupère aussi description
     const allowed = ['en_cours', 'clos'];
     if (!allowed.includes(status)) {
         return res.status(400).json({ error: 'status invalide' });
@@ -692,47 +725,51 @@ app.patch('/tickets/:id/status', requireAuth, requireRole('tech'), async (req, r
     if (status === 'clos') {
         // 1) odomètre complet
         if (odo_start == null || odo_end == null) {
-        return res.status(409).json({ error: 'Impossible de clore: odomètre incomplet' });
+            return res.status(409).json({ error: 'Impossible de clore: odomètre incomplet' });
         }
 
         // 2) timestamps requis (reach_wh, start_site, leave_site, back_wh)
         const needed = ['reach_wh','start_site','leave_site','back_wh'];
         const tsq = await pool.query(
-        `select punch_type from ticket_timestamps
+            `select punch_type from ticket_timestamps
             where ticket_id=$1 and punch_type = any($2::text[])`,
-        [id, needed]
+            [id, needed]
         );
         const present = new Set(tsq.rows.map(r => r.punch_type));
         const missing = needed.filter(t => !present.has(t));
         if (missing.length) {
-        return res.status(409).json({ error: `Impossible de clore: timestamps manquants (${missing.join(', ')})` });
+            return res.status(409).json({ error: `Impossible de clore: timestamps manquants (${missing.join(', ')})` });
         }
 
         // 3) pièces requises: au moins 1 installed et 1 replaced
         const pq = await pool.query(
-        `select part_action, count(*) from ticket_parts
+            `select part_action, count(*) from ticket_parts
             where ticket_id=$1 and part_action in ('installed','replaced')
             group by part_action`,
-        [id]
+            [id]
         );
         const counts = Object.fromEntries(pq.rows.map(r => [r.part_action, Number(r.count)]));
         if (!counts.installed || !counts.replaced) {
-        return res.status(409).json({ error: 'Impossible de clore: pièces installed et replaced obligatoires' });
+            return res.status(409).json({
+                error: 'Impossible de clore: il faut au moins une pièce "installed" (nouvelle) et une pièce "replaced" (ancienne).'
+            });
         }
+
     }
 
     const upd = await pool.query(
         `update tickets
             set ticket_status = $1,
-                close_description = coalesce($2, close_description)
+                description   = coalesce($2, description)   -- <- bonne colonne
         where id = $3
         returning id, client_name, site_name, site_address,
                 ticket_status as status, purpose, created_at as "createdAt",
-                odo_start, odo_end, close_description`,
+                odo_start, odo_end, description`,
         [status, description ?? null, id]
-        );
+    );
     res.json(upd.rows[0]);
 });
+
 
 
 // Endpoints parts

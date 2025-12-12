@@ -1,6 +1,6 @@
 // web/src/components/auth/Login.jsx
-import { useState, useEffect } from "react";   // ← ajoute useEffect ici
-import { API_URL } from "../../utils/api.js";
+import { useState, useEffect } from "react";
+import { API_URL, setAccessToken } from "../../utils/api.js";
 
 export default function Login({ onLogin }) {
     const [email, setEmail] = useState("mistertest@example.com");
@@ -27,6 +27,7 @@ export default function Login({ onLogin }) {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ email, password }),
+            credentials: "include", // cookie refresh
         });
 
         const data = await res.json();
@@ -36,6 +37,13 @@ export default function Login({ onLogin }) {
         }
 
         // data.access = token, data.user = user
+        if (data.access) {
+            setAccessToken(data.access);
+        }
+        if (data.user) {
+            localStorage.setItem("user", JSON.stringify(data.user));
+        }
+
         onLogin(data);
         } catch (e) {
         console.error(e);

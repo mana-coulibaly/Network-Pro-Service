@@ -9,29 +9,31 @@ export default function CurrentCallsPage() {
     const [error, setError] = useState("");
     const [selectedTicketId, setSelectedTicketId] = useState(null);
 
+    // chargement initial
     useEffect(() => {
-        async function load() {
-            try {
-            setLoading(true);
-            setError("");
-
-            const list = await api("/tickets?mine=1");
-
-            // 👉 ne garder que les tickets en cours ou brouillon
-            const actifs = (list || []).filter(
-                (t) => t.status === "en_cours" || t.status === "draft"
-            );
-
-            setTickets(actifs);
-            } catch (e) {
-            console.error(e);
-            setError(e.message || "Erreur chargement tickets");
-            } finally {
-            setLoading(false);
-            }
-        }
-        load();
+        loadTickets();
     }, []);
+
+    async function loadTickets() {
+        try {
+        setLoading(true);
+        setError("");
+
+        const list = await api("/tickets?mine=1");
+
+        // ne garder que les tickets en cours ou brouillon
+        const actifs = (list || []).filter(
+            (t) => t.status === "en_cours" || t.status === "draft"
+        );
+
+        setTickets(actifs);
+        } catch (e) {
+        console.error(e);
+        setError(e.message || "Erreur chargement tickets");
+        } finally {
+        setLoading(false);
+        }
+    }
 
     function handleSelect(id) {
         setSelectedTicketId(id);
@@ -39,6 +41,19 @@ export default function CurrentCallsPage() {
 
     function handleCloseDetail() {
         setSelectedTicketId(null);
+    }
+
+    // appelé par TicketDetail quand le ticket change de statut (ex: clos)
+    function handleTicketUpdated(updatedTicket) {
+        setTickets((prev) => {
+        const remplacés = prev.map((t) =>
+            t.id === updatedTicket.id ? updatedTicket : t
+        );
+        // on applique le même filtre qu'au chargement :
+        return remplacés.filter(
+            (t) => t.status === "en_cours" || t.status === "draft"
+        );
+        });
     }
 
     return (
@@ -104,7 +119,11 @@ export default function CurrentCallsPage() {
         )}
 
         {selectedTicketId && (
-            <TicketDetail ticketId={selectedTicketId} onClose={handleCloseDetail} />
+            <TicketDetail
+            ticketId={selectedTicketId}
+            onClose={handleCloseDetail}
+            onTicketUpdated={handleTicketUpdated}
+            />
         )}
         </>
     );

@@ -89,13 +89,23 @@ function App() {
     }
   }
 
-  // 🔐 Pas de token → écran de login
+  // Pas de token → écran de login
   if (!auth.token) {
     return <Login onLogin={handleLoginSuccess} />;
   }
 
-  const userName = auth.user?.email || "Utilisateur connecté";
+  // Nom à partir de first_name / last_name, sinon on retombe sur l'email
+  const userName =
+    auth.user
+      ? [auth.user.first_name, auth.user.last_name].filter(Boolean).join(" ") ||
+        auth.user.email ||
+        "Utilisateur connecté"
+      : "Utilisateur connecté";
+
+  const userEmail = auth.user?.email || "";
   const userRole = auth.user?.role || "";
+
+  
 
   return (
     <div className="dashboard-root">
