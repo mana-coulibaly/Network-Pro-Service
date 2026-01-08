@@ -116,6 +116,20 @@ export function clearSession() {
         // refresh impossible → on renvoie l'erreur
         throw e;
         }
+        // Si après refresh + retry c'est toujours 401 → session morte → login direct
+        if (res.status === 401) {
+        // Optionnel: message pour l'écran de login
+        sessionStorage.setItem("authError", "Session expirée, veuillez vous reconnecter.");
+
+        localStorage.removeItem("accessToken");
+        localStorage.removeItem("user");
+
+        // Redirection propre vers l'app → App.jsx verra qu'il n'y a plus de token → Login
+        window.location.assign("/");
+
+        // Important : empêcher la page courante d'afficher une erreur
+        throw new Error("SESSION_EXPIRED");
+        }
     }
 
     if (!res.ok) {

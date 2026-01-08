@@ -30,7 +30,7 @@ function signRefresh(payload) {
     return jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: process.env.REFRESH_EXPIRES || '30d' });
 }
 
-// REGISTER (pour tests; en prod tu limiteras à l’admin)
+// REGISTER (juste pour tests; en prod on limitera à l’admin)
 app.post('/auth/register', async (req, res) => {
     try {
     const { email, password, role = 'tech' } = req.body || {};
@@ -170,15 +170,9 @@ function requireRole(minRole) {
     };
 }
 
-
-/* function requireRole(role) {
-    return (req, res, next) => req.user?.role === role ? next() : res.status(403).json({ error:'forbidden' });
-} */
-
-
 // ---------- Endpoints ----------
 
-// -- Admin endpoints ---
+// -- ADMIN Endpoints ---
 // lister les users
 app.get('/admin/users', requireAuth, requireRole('admin'), async (req, res) => {
     const { rows } = await pool.query(
@@ -234,7 +228,7 @@ app.patch('/admin/users/:id', requireAuth, requireRole('admin'), async (req, res
 
 
 
-// --- Manager endpoints ---
+// --- MANAGER Endpoints ---
 // Lister tous les tickets avec filtres optionnels: par tech, statut, dates
 // query possible : status, tech_id, q, from, to, limit, offset
 app.get('/manager/tickets', requireAuth, requireRole('manager'), async (req, res) => {
@@ -338,6 +332,7 @@ app.get('/manager/tickets/:id', requireAuth, requireRole('manager'), async (req,
         );
         if (!t.rowCount) return res.status(404).json({ error: 'not found' });
 
+        // timestamps
         const timestamps = await pool.query(
         `select punch_type, ts
             from ticket_timestamps
@@ -346,6 +341,7 @@ app.get('/manager/tickets/:id', requireAuth, requireRole('manager'), async (req,
         [id]
         );
 
+        // parts
         const parts = await pool.query(
         `select
             id,
@@ -360,12 +356,22 @@ app.get('/manager/tickets/:id', requireAuth, requireRole('manager'), async (req,
         [id]
         );
 
-        // plus tard: expenses, consumables, tools_used...
+        // consumables
+        const cons = await pool.query(
+            `select id, consumable_name, qty, unit, created_at
+            from ticket_consumables
+            where ticket_id=$1
+            order by created_at asc`,
+            [id]
+        );
+
+        // plus tard: expenses, tools_used...
 
         res.json({
         ticket: t.rows[0],
         timestamps: timestamps.rows,
         parts: parts.rows,
+        consumables: cons.rows,
         });
     } catch (e) {
         console.error(e);
@@ -532,8 +538,7 @@ app.patch('/manager/techs/:techId/certifications/:certId', requireAuth, requireR
 
 
 
-
-// --- Tech endpoints ---
+// --- TECH Endpoints ---
 // Créer un ticket
 // body: { client_name, site_name, site_address, purpose }
 app.post('/tickets', requireAuth, requireRole('tech'), async (req, res) => {
@@ -627,21 +632,22 @@ app.post('/tickets/:id/timestamps', requireAuth, requireRole('tech'), async (req
 
 
 
-// Détail d'un ticket + liste des punchs (pour griser les boutons côté front)
+// Détail d'un ticket + punches + pièces + consommables
 app.get('/tickets/:id', requireAuth, requireRole('tech'), async (req, res) => {
     const { id } = req.params;
 
-    // vérifier ownership + retourner le ticket
+    // ticket (ownership)
     const t = await pool.query(
         `select id, client_name, site_name, site_address,
-                ticket_status as status, purpose, created_at as "createdAt"
+                ticket_status as status, purpose, created_at as "createdAt",
+                odo_start, odo_end, description
         from tickets
         where id=$1 and tech_id=$2`,
         [id, req.user.sub]
     );
     if (!t.rowCount) return res.status(404).json({ error: 'not found' });
 
-    // récupérer les punchs
+    // punches
     const p = await pool.query(
         `select punch_type, ts
         from ticket_timestamps
@@ -650,8 +656,32 @@ app.get('/tickets/:id', requireAuth, requireRole('tech'), async (req, res) => {
         [id]
     );
 
-    res.json({ ticket: t.rows[0], timestamps: p.rows });
+    // parts
+    const parts = await pool.query(
+        `select id, part_action, part_name, serial_number, part_state, created_at
+        from ticket_parts
+        where ticket_id=$1
+        order by created_at asc`,
+        [id]
+    );
+
+    // consumables
+    const cons = await pool.query(
+        `select id, consumable_name, qty, unit, created_at
+        from ticket_consumables
+        where ticket_id=$1
+        order by created_at asc`,
+        [id]
+    );
+
+    res.json({
+        ticket: t.rows[0],
+        timestamps: p.rows,
+        parts: parts.rows,
+        consumables: cons.rows,
+    });
 });
+
 
 
 // Punch (idempotent) sur un ticket
@@ -742,7 +772,20 @@ app.patch('/tickets/:id/status', requireAuth, requireRole('tech'), async (req, r
         }
 
         // 3) pièces requises: au moins 1 installed et 1 replaced
+
         const pq = await pool.query(
+        `select count(*)::int as n
+        from ticket_parts
+        where ticket_id=$1`,
+        [id]
+        );
+
+        if (pq.rows[0].n === 0) {
+        return res.status(409).json({ error: 'Impossible de clore: ajoutez une pièce ou "Aucune pièce"' });
+        }
+
+
+        /* const pq = await pool.query(
             `select part_action, count(*) from ticket_parts
             where ticket_id=$1 and part_action in ('installed','replaced')
             group by part_action`,
@@ -753,7 +796,7 @@ app.patch('/tickets/:id/status', requireAuth, requireRole('tech'), async (req, r
             return res.status(409).json({
                 error: 'Impossible de clore: il faut au moins une pièce "installed" (nouvelle) et une pièce "replaced" (ancienne).'
             });
-        }
+        } */
 
     }
 
@@ -781,18 +824,48 @@ app.post('/tickets/:id/parts', requireAuth, requireRole('tech'), async (req, res
     const { part_action, part_name, serial_number, part_state } = req.body || {};
 
     // ownership
-    const own = await pool.query(`select 1 from tickets where id=$1 and tech_id=$2`, [id, req.user.sub]);
+    const own = await pool.query(
+        'select 1 from tickets where id=$1 and tech_id=$2',
+        [id, req.user.sub]
+    );
     if (!own.rowCount) return res.status(404).json({ error: 'not found' });
 
     // validations
-    const actions = ['installed','replaced'];
-    const states  = ['new','used','DOA'];
-    if (!actions.includes(part_action)) return res.status(400).json({ error: 'part_action invalide' });
-    if (!states.includes(part_state))   return res.status(400).json({ error: 'part_state invalide' });
-    if (!part_name?.trim())             return res.status(400).json({ error: 'part_name requis' });
-    if (!serial_number?.trim())         return res.status(400).json({ error: 'serial_number requis' });
+    const actions = ['installed', 'replaced','broken', 'none'];
+    const states  = ['new', 'used', 'broken', 'DOA'];
 
-    // normaliser le SN pour éviter doublons “visuels”
+    if (!actions.includes(part_action)) {
+        return res.status(400).json({ error: 'part_action invalide' });
+    }
+
+    // Cas "Aucune pièce"
+    if (part_action === 'none') {
+        try {
+        const { rows } = await pool.query(
+            `insert into ticket_parts(ticket_id, part_action, part_name, serial_number, part_state)
+            values ($1,$2,$3,$4,$5)
+            returning id, ticket_id, part_action, part_name, serial_number, part_state, created_at`,
+            [id, 'none', 'Aucune pièce utilisée', null, null]
+        );
+        return res.json(rows[0]);
+        } catch (e) {
+        console.error(e);
+        return res.status(500).json({ error: 'fail_add_part' });
+        }
+    }
+
+    // Cas normal (installed / replaced)
+    if (!states.includes(part_state)) {
+        return res.status(400).json({ error: 'part_state invalide' });
+    }
+    if (!part_name?.trim()) {
+        return res.status(400).json({ error: 'part_name requis' });
+    }
+    if (!serial_number?.trim()) {
+        return res.status(400).json({ error: 'serial_number requis' });
+    }
+
+    // normaliser le SN pour éviter doublons "visuels"
     const sn = serial_number.trim().toUpperCase();
 
     try {
@@ -804,12 +877,14 @@ app.post('/tickets/:id/parts', requireAuth, requireRole('tech'), async (req, res
         );
         res.json(rows[0]);
     } catch (e) {
-        // violation de l’unique index → doublon SN sur ce ticket
-        if (e.code === '23505') return res.status(409).json({ error: 'serial déjà saisi pour ce ticket' });
-        console.error(e); return res.status(500).json({ error: 'fail_add_part' });
+        // violation de l’unique index -> doublon SN sur ce ticket
+        if (e.code === '23505') {
+        return res.status(409).json({ error: 'serial déjà saisi pour ce ticket' });
+        }
+        console.error(e);
+        return res.status(500).json({ error: 'fail_add_part' });
     }
 });
-
 
 // Lister les pièces d’un ticket
 app.get('/tickets/:id/parts', requireAuth, requireRole('tech'), async (req, res) => {
@@ -826,6 +901,57 @@ app.get('/tickets/:id/parts', requireAuth, requireRole('tech'), async (req, res)
     );
     res.json(rows);
 });
+
+// Consommables
+// body: { consumable_name, qty, unit }
+app.post('/tickets/:id/consumables', requireAuth, requireRole('tech'), async (req, res) => {
+    const { id } = req.params;
+    const { consumable_name, qty, unit } = req.body || {};
+
+    // ownership
+    const own = await pool.query(
+        'select 1 from tickets where id=$1 and tech_id=$2',
+        [id, req.user.sub]
+    );
+    if (!own.rowCount) return res.status(404).json({ error: 'not found' });
+
+    // validations
+    const name = (consumable_name || '').trim();
+    if (!name) return res.status(400).json({ error: 'consumable_name requis' });
+
+    const cleanUnit = String(unit || 'unit').trim().toLowerCase();
+    const allowedUnits = ['unit', 'box', 'pack', 'roll', 'm'];
+    if (!allowedUnits.includes(cleanUnit)) {
+        return res.status(400).json({ error: 'unit invalide' });
+    }
+
+    let qtyVal = null;
+    if (qty !== undefined && qty !== null && String(qty).trim() !== '') {
+        qtyVal = Number(qty);
+        if (Number.isNaN(qtyVal) || qtyVal <= 0) {
+        return res.status(400).json({ error: 'qty invalide (doit être > 0)' });
+        }
+    }
+
+    try {
+        const { rows } = await pool.query(
+        `insert into ticket_consumables(ticket_id, consumable_name, qty, unit)
+        values ($1,$2,$3,$4)
+        returning id, ticket_id, consumable_name, qty, unit, created_at`,
+        [id, name, qtyVal, cleanUnit]
+        );
+        res.json(rows[0]);
+    } catch (e) {
+        // unique index: doublon par ticket (name+unit)
+        if (e.code === '23505') {
+        return res.status(409).json({ error: 'consommable déjà saisi pour ce ticket' });
+        }
+        console.error(e);
+        return res.status(500).json({ error: 'fail_add_consumable' });
+    }
+});
+
+
 
 
 

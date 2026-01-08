@@ -14,6 +14,8 @@ import InventoryPage from "./components/pages/Inventory.jsx";
 import TimesheetPage from "./components/pages/Timesheet.jsx";
 import WorkorderPage from "./components/pages/Workorder.jsx";
 import InfoPage from "./components/pages/InfoPage.jsx";
+import ManagerTickets from "./components/pages/ManagerTickets.jsx";
+
 
 // Identifiants de pages
 const PAGES = {
@@ -25,6 +27,7 @@ const PAGES = {
   TIMESHEET: "timesheet",
   WORKORDER: "workorder",
   INFO: "info",
+  MANAGER_TICKETS: "manager_tickets",
 };
 
 function App() {
@@ -32,7 +35,7 @@ function App() {
   const [activePage, setActivePage] = useState(PAGES.CURRENT_CALLS);
   const [inventaireOpen, setInventaireOpen] = useState(false);
 
-  // 🔄 Restore auth depuis localStorage
+  // Restore auth depuis localStorage
   useEffect(() => {
     const storedToken = localStorage.getItem("accessToken");
     const storedUser = localStorage.getItem("user");
@@ -44,7 +47,7 @@ function App() {
     }
   }, []);
 
-  // ✅ Login réussi
+  // Login réussi
   function handleLoginSuccess(data) {
     const { access, user } = data;
     localStorage.setItem("accessToken", access);
@@ -52,7 +55,7 @@ function App() {
     setAuth({ token: access, user });
   }
 
-  // 🚪 Logout
+  // Logout
   function handleLogout() {
     localStorage.removeItem("accessToken");
     localStorage.removeItem("user");
@@ -83,6 +86,9 @@ function App() {
       case PAGES.INFO:
         return <InfoPage />;
 
+      case PAGES.MANAGER_TICKETS:
+        return <ManagerTickets />;
+
       case PAGES.CURRENT_CALLS:
       default:
         return <CurrentCallsPage />;
@@ -94,6 +100,50 @@ function App() {
     return <Login onLogin={handleLoginSuccess} />;
   }
 
+  // Infos utilisateur
+  //const userEmail = auth.user?.email || "";
+  const userRole = auth.user?.role || "";
+
+  // Vue spéciale pour ADMIN
+  if (userRole === "admin") {
+    return (
+      <div className="dashboard-root">
+        <main className="main">
+          <header className="topbar">
+            <div className="topbar-user">
+              <div className="avatar" />
+              <div>
+                <div className="user-name">
+                  {[auth.user.first_name, auth.user.last_name]
+                    .filter(Boolean)
+                    .join(" ") || auth.user.email}
+                </div>
+                <div className="user-role">admin</div>
+              </div>
+            </div>
+
+            <div className="topbar-actions">
+              <button className="icon-button" onClick={handleLogout}>
+                🚪
+              </button>
+            </div>
+          </header>
+
+          <section className="table-card" style={{ padding: "1.5rem" }}>
+            <h2>Espace administrateur</h2>
+            <p>
+              Le compte connecté a le rôle <strong>admin</strong>. <br />
+              Ici on branchera la gestion des utilisateurs, profils des techs,
+              etc. via les endpoints <code>/admin/...</code> et{" "}
+              <code>/manager/...</code>.
+            </p>
+          </section>
+        </main>
+      </div>
+    );
+  }
+
+
   // Nom à partir de first_name / last_name, sinon on retombe sur l'email
   const userName =
     auth.user
@@ -102,10 +152,7 @@ function App() {
         "Utilisateur connecté"
       : "Utilisateur connecté";
 
-  const userEmail = auth.user?.email || "";
-  const userRole = auth.user?.role || "";
 
-  
 
   return (
     <div className="dashboard-root">
@@ -133,6 +180,17 @@ function App() {
             <span>Appels historique</span>
           </button>
 
+                    {/*  Menu supplémentaire uniquement pour les managers */}
+          {userRole === "manager" && (
+            <button
+              className="nav-item"
+              onClick={() => setActivePage(PAGES.MANAGER_TICKETS)}
+            >
+              <span className="nav-icon">📊</span>
+              <span>Tous les tickets</span>
+            </button>
+          )}
+
           <button
             className="nav-item"
             onClick={() => setActivePage(PAGES.NEW_TICKET)}
@@ -154,7 +212,7 @@ function App() {
             onClick={() => setActivePage(PAGES.INFO)}
           >
             <span className="nav-icon">ℹ</span>
-            <span>Infos</span>
+            <span>Profil</span>
           </button>
 
           <div className="nav-group">
@@ -250,7 +308,7 @@ function App() {
         </section>
 
         {/* Zone de contenu : page active */}
-        <section className="table-card">{renderPage()}</section>
+        <section className="table-card">{renderPage(userRole)}</section>
       </main>
     </div>
   );
