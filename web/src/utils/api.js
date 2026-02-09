@@ -86,6 +86,20 @@ export function clearSession() {
         data = text;
     }
 
+    // ✅ Hard mode : si le backend exige un changement de mot de passe
+    if (res.status === 403 && data?.error === "PASSWORD_CHANGE_REQUIRED") {
+    const storedUser = localStorage.getItem("user");
+    if (storedUser) {
+        const u = JSON.parse(storedUser);
+        u.must_change_password = true;
+        localStorage.setItem("user", JSON.stringify(u));
+    }
+    // Laisse App.jsx afficher ChangePassword
+    window.location.assign("/");
+    throw new Error("PASSWORD_CHANGE_REQUIRED");
+    }
+
+
     // Si token expiré / invalide : on tente un refresh une fois
     if (res.status === 401) {
         try {

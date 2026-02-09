@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcrypt');
+const crypto = require('crypto')
 const jwt = require('jsonwebtoken');
 const cookieParser = require('cookie-parser');
 const { Pool } = require('pg');
@@ -62,53 +63,38 @@ app.post('/auth/register', async (req, res) => {
 
 
 // LOGIN
-app.post('/auth/login', async (req, res) => {
+app.post("/auth/login", async (req, res) => {
     try {
         const { email, password } = req.body || {};
 
         const q = await pool.query(
-        `select
-            id,
-            email,
-            role,
-            password_hash,
-            first_name,
-            last_name,
-            coalesce(is_active,true) as is_active
+        `select id, email, role, password_hash,
+                first_name, last_name,
+                coalesce(is_active,true) as is_active,
+                coalesce(must_change_password,false) as must_change_password,
+                coalesce(token_version,0) as token_version
         from users
-        where email = $1`,
+        where email=$1`,
         [email?.toLowerCase()]
         );
 
         const u = q.rows[0];
-        if (!u || !u.is_active) {
-        return res.status(401).json({ error: 'invalid credentials' });
-        }
+        if (!u || !u.is_active) return res.status(401).json({ error: "invalid credentials" });
 
-        const ok = await bcrypt.compare(password || '', u.password_hash || '');
-        if (!ok) {
-        return res.status(401).json({ error: 'invalid credentials' });
-        }
+        const ok = await bcrypt.compare(password || "", u.password_hash || "");
+        if (!ok) return res.status(401).json({ error: "invalid credentials" });
 
-        const access = jwt.sign(
-        { sub: u.id, role: u.role },
-        process.env.JWT_SECRET,
-        { expiresIn: process.env.JWT_EXPIRES || '15m' }
-        );
-        const refresh = jwt.sign(
-        { sub: u.id },
-        process.env.JWT_SECRET,
-        { expiresIn: process.env.REFRESH_EXPIRES || '30d' }
-        );
+        const access = signAccess({ sub: u.id, role: u.role });
 
-        res.cookie('refresh', refresh, {
+        const refresh = signRefresh({ sub: u.id, token_version: u.token_version });
+
+        res.cookie("refresh", refresh, {
         httpOnly: true,
-        sameSite: 'lax',
-        secure: process.env.NODE_ENV === 'production',
+        sameSite: "lax",
+        secure: process.env.NODE_ENV === "production",
         maxAge: 1000 * 60 * 60 * 24 * 30,
         });
 
-        // renvoyer aussi user info si besoin
         res.json({
         access,
         user: {
@@ -117,11 +103,156 @@ app.post('/auth/login', async (req, res) => {
             role: u.role,
             first_name: u.first_name,
             last_name: u.last_name,
+            must_change_password: u.must_change_password,
         },
         });
     } catch (err) {
-        console.error('login error:', err);
-        res.status(500).json({ error: 'fail_login' });
+        console.error("login error:", err);
+        res.status(500).json({ error: "fail_login" });
+    }
+});
+
+// Refresh token
+app.post("/auth/refresh", async (req, res) => {
+    try {
+        const token = req.cookies?.refresh;
+        if (!token) return res.status(401).json({ error: "no refresh" });
+
+        let payload;
+        try {
+        payload = jwt.verify(token, process.env.JWT_SECRET);
+        } catch {
+        return res.status(401).json({ error: "invalid refresh" });
+        }
+
+        const q = await pool.query(
+        `select id, email, role, first_name, last_name,
+                coalesce(is_active,true) as is_active,
+                coalesce(must_change_password,false) as must_change_password,
+                coalesce(token_version,0) as token_version
+        from users
+        where id=$1`,
+        [payload.sub]
+        );
+
+        if (!q.rowCount) return res.status(401).json({ error: "user not found" });
+
+        const u = q.rows[0];
+        if (!u.is_active) return res.status(401).json({ error: "inactive" });
+
+        // HARD MODE: refresh token doit matcher token_version DB
+        if ((payload.token_version ?? 0) !== (u.token_version ?? 0)) {
+        res.clearCookie("refresh", {
+            httpOnly: true,
+            sameSite: "lax",
+            secure: process.env.NODE_ENV === "production",
+        });
+        return res.status(401).json({ error: "refresh revoked" });
+        }
+
+        const access = signAccess({ sub: u.id, role: u.role });
+
+        // rotation refresh (optionnel mais recommandé)
+        const newRefresh = signRefresh({ sub: u.id, token_version: u.token_version });
+        res.cookie("refresh", newRefresh, {
+        httpOnly: true,
+        sameSite: "lax",
+        secure: process.env.NODE_ENV === "production",
+        maxAge: 1000 * 60 * 60 * 24 * 30,
+        });
+
+        res.json({
+        access,
+        user: {
+            id: u.id,
+            email: u.email,
+            role: u.role,
+            first_name: u.first_name,
+            last_name: u.last_name,
+            must_change_password: u.must_change_password,
+        },
+        });
+    } catch (e) {
+        console.error("refresh error:", e);
+        return res.status(500).json({ error: "fail_refresh" });
+    }
+});
+
+
+// Changer son mot de passe (authentifié)
+app.post("/auth/change-password", requireAuth, async (req, res) => {
+    try {
+        const { current_password, new_password } = req.body || {};
+
+        if (!new_password || String(new_password).length < 8) {
+        return res.status(400).json({ error: "Mot de passe trop court (min 8)" });
+        }
+
+        const q = await pool.query(
+        `select password_hash,
+                coalesce(must_change_password,false) as must_change_password,
+                coalesce(token_version,0) as token_version,
+                email, role, first_name, last_name,
+                coalesce(is_active,true) as is_active
+        from users
+        where id=$1`,
+        [req.user.sub]
+        );
+        if (!q.rowCount) return res.status(404).json({ error: "user not found" });
+
+        const u = q.rows[0];
+
+        // Si l'utilisateur n'est PAS en mode "must change", on exige le mot de passe actuel
+        if (!u.must_change_password) {
+        const ok = await bcrypt.compare(current_password || "", u.password_hash || "");
+        if (!ok) return res.status(401).json({ error: "Mot de passe actuel invalide" });
+        }
+
+        const password_hash = await bcrypt.hash(new_password, 10);
+
+        // HARD MODE: on révoque tous les refresh existants
+        const upd = await pool.query(
+        `update users
+            set password_hash=$1,
+                must_change_password=false,
+                password_changed_at=now(),
+                token_version = coalesce(token_version,0) + 1
+        where id=$2
+        returning id, email, role, first_name, last_name,
+                    coalesce(is_active,true) as is_active,
+                    coalesce(must_change_password,false) as must_change_password,
+                    coalesce(token_version,0) as token_version`,
+        [password_hash, req.user.sub]
+        );
+
+        const nu = upd.rows[0];
+
+        // Ré-émission d’un refresh + access pour ne pas déconnecter l’utilisateur
+        const access = signAccess({ sub: nu.id, role: nu.role });
+        const refresh = signRefresh({ sub: nu.id, token_version: nu.token_version });
+
+        res.cookie("refresh", refresh, {
+        httpOnly: true,
+        sameSite: "lax",
+        secure: process.env.NODE_ENV === "production",
+        maxAge: 1000 * 60 * 60 * 24 * 30,
+        });
+
+        res.json({
+        ok: true,
+        access,
+        user: {
+            id: nu.id,
+            email: nu.email,
+            role: nu.role,
+            first_name: nu.first_name,
+            last_name: nu.last_name,
+            must_change_password: nu.must_change_password,
+        },
+        });
+    } catch (e) {
+        console.error("change-password error:", e);
+        res.status(500).json({ error: "fail_change_password" });
     }
 });
 
@@ -134,7 +265,7 @@ app.post('/auth/logout', (req, res) => {
 });
 
 // Middlewares de protection
-
+// requireAuth: vérifie le token d’accès
 function requireAuth(req, res, next) {
     const auth = req.headers.authorization || '';
     const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
@@ -148,14 +279,49 @@ function requireAuth(req, res, next) {
     }
 }
 
+// requirePasswordChanged: vérifie que l’utilisateur n’est pas en mode "must_change_password"
+function requirePasswordChanged(req, res, next) {
+    const openPrefixes = [
+        "/auth/login",
+        "/auth/refresh",
+        "/auth/logout",
+        "/auth/change-password",
+    ];
+
+    if (openPrefixes.some((p) => req.path.startsWith(p))) {
+        return next();
+    }
+
+    pool
+        .query(
+        `select coalesce(must_change_password,false) as must_change_password
+        from users
+        where id=$1`,
+        [req.user.sub]
+        )
+        .then((r) => {
+        if (r.rowCount && r.rows[0].must_change_password) {
+            return res.status(403).json({ error: "PASSWORD_CHANGE_REQUIRED" });
+        }
+        next();
+        })
+        .catch((err) => {
+        console.error("requirePasswordChanged error:", err);
+        res.status(500).json({ error: "fail_auth" });
+        });
+}
+
+
 // hiérarchie des rôles
 const ROLE_LEVEL = {
     tech: 1,
-    manager: 2,
-    admin: 3,
+    team_lead: 2,
+    manager: 3,
+    admin: 4,
 };
 
-// requireRole('tech') => min tech (tech + manager + admin)
+// requireRole('tech') => min tech (tech + team_lead + manager + admin)
+// requireRole('team_lead') => min team_lead (team_lead + manager + admin)
 // requireRole('manager') => min manager (manager + admin)
 // requireRole('admin') => admin seulement
 function requireRole(minRole) {
@@ -174,54 +340,122 @@ function requireRole(minRole) {
 
 // -- ADMIN Endpoints ---
 // lister les users
-app.get('/admin/users', requireAuth, requireRole('admin'), async (req, res) => {
+app.get('/admin/users', requireAuth, requirePasswordChanged, requireRole('admin'), async (req, res) => {
     const { rows } = await pool.query(
-        `select id, email, role, created_at, coalesce(is_active,true) as is_active  from users order by created_at desc`
+        `select id, email, role, first_name, last_name,
+                created_at, coalesce(is_active,true) as is_active,
+                coalesce(must_change_password,false) as must_change_password
+        from users
+        order by created_at desc`
     );
     res.json(rows);
 });
 
-// Créer un utilisateur (admin) – le tech recevra un mot de passe provisoire
-app.post('/admin/users', requireAuth, requireRole('admin'), async (req, res) => {
-    const { email, password, role = 'tech' } = req.body || {};
-    if (!email || !password) {
-        return res.status(400).json({ error: 'email et password requis' });
-    }
-    if (!['tech','manager','admin'].includes(role)) {
-        return res.status(400).json({ error: 'role invalide' });
-    }
+// normalise une chaîne pour en faire une partie d’email
+function normalizeName(s = "") {
+    return s
+        .trim()
+        .toLowerCase()
+        .normalize("NFD")                 // enlève accents
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^a-z0-9]+/g, ".")      // espaces -> points
+        .replace(/^\.+|\.+$/g, "");
+}
 
-    const hash = await bcrypt.hash(password, 12);
-    const r = await pool.query(
-        `insert into users(email, password_hash, role)
-        values ($1,$2,$3)
-        on conflict (email) do nothing
-        returning id, email, role, created_at`,
-        [email.toLowerCase(), hash, role]
-    );
-    if (!r.rowCount) {
-        return res.status(409).json({ error: 'email déjà utilisé' });
+// génère un email unique dans la BDD
+async function generateUniqueEmail(pool, firstName, lastName, domain = "networkproservices.com") {
+    const fn = normalizeName(firstName);
+    const ln = normalizeName(lastName);
+
+    // base: prenom.nom@domain
+    let local = `${fn}.${ln}`.replace(/\.+/g, ".");
+    if (!local || local === ".") local = `user.${Date.now()}`;
+
+    let email = `${local}@${domain}`;
+    let i = 1;
+
+    while (true) {
+        const q = await pool.query(`select 1 from users where email=$1`, [email]);
+        if (!q.rowCount) return email;
+        i += 1;
+        email = `${local}${i}@${domain}`; // prenom.nom2@domain, prenom.nom3@domain...
     }
-    res.status(201).json(r.rows[0]);
+}
+
+// génère un mot de passe temporaire sécurisé
+function generateTempPassword() {
+  // 12 chars safe: base64url
+  return crypto.randomBytes(9).toString("base64url"); // ~12 caractères
+}
+
+// Créer un utilisateur (admin) – le tech recevra un mot de passe provisoire
+app.post("/admin/users", requireAuth, requirePasswordChanged, requireRole("admin"), async (req, res) => {
+    try {
+        const { first_name, last_name, role } = req.body || {};
+        const allowedRoles = ["tech", "team_lead", "manager", "admin"];
+
+        if (!first_name?.trim() || !last_name?.trim()) {
+        return res.status(400).json({ error: "first_name et last_name requis" });
+        }
+        if (!allowedRoles.includes(role)) {
+        return res.status(400).json({ error: "role invalide" });
+        }
+
+        // domaine configurable
+        const domain = process.env.EMAIL_DOMAIN || "networkproservices.com";
+
+        const email = await generateUniqueEmail(pool, first_name, last_name, domain);
+        const tempPassword = generateTempPassword();
+        const password_hash = await bcrypt.hash(tempPassword, 10);
+
+        const q = await pool.query(
+        `insert into users(email, password_hash, role, first_name, last_name, is_active, must_change_password)
+        values ($1,$2,$3,$4,$5,true,true)
+        returning id, email, role, first_name, last_name, is_active, must_change_password`,
+        [email, password_hash, role, first_name.trim(), last_name.trim()]
+        );
+
+        // IMPORTANT:
+        // Tu renvoies le temp password UNE SEULE FOIS à l’admin (affichage/copie).
+        // Ne le stocke jamais en clair.
+        res.status(201).json({
+        user: q.rows[0],
+        temp_password: tempPassword,
+        });
+    } catch (e) {
+        console.error(e);
+        return res.status(500).json({ error: "fail_create_user" });
+    }
 });
+
 
 // Modifier rôle / activation (admin)
 app.patch('/admin/users/:id', requireAuth, requireRole('admin'), async (req, res) => {
     const { id } = req.params;
-    const { role, is_active } = req.body || {};
+    const { role, is_active, must_change_password } = req.body || {};
 
-    if (role && !['tech','manager','admin'].includes(role)) {
+    if (role && !['tech','team_lead','manager','admin'].includes(role)) {
         return res.status(400).json({ error: 'role invalide' });
     }
 
     const r = await pool.query(
         `update users
-            set role = coalesce($1, role),
-                is_active = coalesce($2, is_active)
-        where id = $3
-        returning id, email, role, coalesce(is_active,true) as is_active, created_at`,
-        [role || null, typeof is_active === 'boolean' ? is_active : null, id]
+        set role = coalesce($1, role),
+            is_active = coalesce($2, is_active),
+            must_change_password = coalesce($3, must_change_password)
+        where id = $4
+        returning id, email, role, first_name, last_name,
+                coalesce(is_active,true) as is_active,
+                coalesce(must_change_password,false) as must_change_password,
+                created_at`,
+        [
+        role || null,
+        typeof is_active === 'boolean' ? is_active : null,
+        typeof must_change_password === 'boolean' ? must_change_password : null,
+        id
+        ]
     );
+
     if (!r.rowCount) return res.status(404).json({ error: 'user not found' });
     res.json(r.rows[0]);
 });
@@ -541,7 +775,7 @@ app.patch('/manager/techs/:techId/certifications/:certId', requireAuth, requireR
 // --- TECH Endpoints ---
 // Créer un ticket
 // body: { client_name, site_name, site_address, purpose }
-app.post('/tickets', requireAuth, requireRole('tech'), async (req, res) => {
+app.post('/tickets', requireAuth, requirePasswordChanged, requireRole('tech'), async (req, res) => {
     try {
         const { client_name, site_name, site_address, purpose } = req.body || {};
         if (!client_name || !site_name || !site_address) {
@@ -563,7 +797,7 @@ app.post('/tickets', requireAuth, requireRole('tech'), async (req, res) => {
 });
 
 // Lister MES tickets
-app.get('/tickets', requireAuth, requireRole('tech'), async (req, res) => {
+app.get('/tickets', requireAuth, requirePasswordChanged,requireRole('tech'), async (req, res) => {
     try {
         const limit  = Math.min(parseInt(req.query.limit || '20', 10), 100);
         const offset = Math.max(parseInt(req.query.offset || '0', 10), 0);

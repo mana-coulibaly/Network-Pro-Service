@@ -15,6 +15,9 @@ import TimesheetPage from "./components/pages/Timesheet.jsx";
 import WorkorderPage from "./components/pages/Workorder.jsx";
 import InfoPage from "./components/pages/InfoPage.jsx";
 import ManagerTickets from "./components/pages/ManagerTickets.jsx";
+import AdminUsers from "./components/pages/AdminUsers.jsx";
+import ChangePassword from "./components/auth/ChangePassword.jsx";
+
 
 
 // Identifiants de pages
@@ -28,12 +31,15 @@ const PAGES = {
   WORKORDER: "workorder",
   INFO: "info",
   MANAGER_TICKETS: "manager_tickets",
+  ADMIN_USERS: "admin_users",
 };
 
 function App() {
   const [auth, setAuth] = useState({ user: null, token: null });
   const [activePage, setActivePage] = useState(PAGES.CURRENT_CALLS);
   const [inventaireOpen, setInventaireOpen] = useState(false);
+  const [forcePwdChange, setForcePwdChange] = useState(false);
+
 
   // Restore auth depuis localStorage
   useEffect(() => {
@@ -49,11 +55,22 @@ function App() {
 
   // Login réussi
   function handleLoginSuccess(data) {
-    const { access, user } = data;
-    localStorage.setItem("accessToken", access);
-    localStorage.setItem("user", JSON.stringify(user));
-    setAuth({ token: access, user });
+      const { access, user } = data;
+
+      localStorage.setItem("accessToken", access);
+      localStorage.setItem("user", JSON.stringify(user));
+      setAuth({ token: access, user });
+
+      // IMPORTANT: si l'utilisateur doit changer son mot de passe, on affiche direct
+      if (user?.must_change_password) {
+        setForcePwdChange(true);
+        sessionStorage.setItem("forcePwdChange", "1"); // optionnel mais utile
+      } else {
+        setForcePwdChange(false);
+        sessionStorage.removeItem("forcePwdChange");
+      }
   }
+
 
   // Logout
   function handleLogout() {
@@ -89,6 +106,9 @@ function App() {
       case PAGES.MANAGER_TICKETS:
         return <ManagerTickets />;
 
+      case PAGES.ADMIN_USERS:
+      return <AdminUsers />;
+
       case PAGES.CURRENT_CALLS:
       default:
         return <CurrentCallsPage />;
@@ -100,49 +120,80 @@ function App() {
     return <Login onLogin={handleLoginSuccess} />;
   }
 
+const forcePwd = forcePwdChange || sessionStorage.getItem("forcePwdChange") === "1";
+
+if (auth.user?.must_change_password || forcePwd) {
+  return (
+    <ChangePassword
+      user={auth.user}
+      onLogout={handleLogout}
+      onDone={(updatedUser) => {
+        sessionStorage.removeItem("forcePwdChange");
+        setForcePwdChange(false);
+        localStorage.setItem("user", JSON.stringify(updatedUser));
+        setAuth((prev) => ({ ...prev, user: updatedUser }));
+      }}
+    />
+  );
+}
+
   // Infos utilisateur
   //const userEmail = auth.user?.email || "";
   const userRole = auth.user?.role || "";
+  //const isAdmin = userRole === "admin";
 
   // Vue spéciale pour ADMIN
   if (userRole === "admin") {
-    return (
-      <div className="dashboard-root">
-        <main className="main">
-          <header className="topbar">
-            <div className="topbar-user">
-              <div className="avatar" />
-              <div>
-                <div className="user-name">
-                  {[auth.user.first_name, auth.user.last_name]
-                    .filter(Boolean)
-                    .join(" ") || auth.user.email}
-                </div>
-                <div className="user-role">admin</div>
+  return (
+    <div className="dashboard-root">
+      <aside className="sidebar">
+        <div className="sidebar-logo">
+          <div className="logo-mark" />
+          <span className="logo-text">NETWORK PRO SERVICES</span>
+        </div>
+
+        <nav className="sidebar-nav">
+          <button
+            className="nav-item"
+            onClick={() => setActivePage(PAGES.ADMIN_USERS)}
+          >
+            <span className="nav-icon">👤</span>
+            <span>Utilisateurs</span>
+          </button>
+        </nav>
+
+        <div className="sidebar-footer">
+          <button className="nav-item" onClick={handleLogout}>
+            <span className="nav-icon">🚪</span>
+            <span>Déconnexion</span>
+          </button>
+        </div>
+      </aside>
+
+      <main className="main">
+        <header className="topbar">
+          <div className="topbar-user">
+            <div className="avatar" />
+            <div>
+              <div className="user-name">
+                {[auth.user?.first_name, auth.user?.last_name]
+                  .filter(Boolean)
+                  .join(" ") || auth.user?.email}
               </div>
+              <div className="user-role">admin</div>
             </div>
+          </div>
 
-            <div className="topbar-actions">
-              <button className="icon-button" onClick={handleLogout}>
-                🚪
-              </button>
-            </div>
-          </header>
+          <div className="topbar-actions">
+            <button className="icon-button" onClick={handleLogout}>🚪</button>
+          </div>
+        </header>
 
-          <section className="table-card" style={{ padding: "1.5rem" }}>
-            <h2>Espace administrateur</h2>
-            <p>
-              Le compte connecté a le rôle <strong>admin</strong>. <br />
-              Ici on branchera la gestion des utilisateurs, profils des techs,
-              etc. via les endpoints <code>/admin/...</code> et{" "}
-              <code>/manager/...</code>.
-            </p>
-          </section>
-        </main>
-      </div>
-    );
-  }
-
+        <section className="table-card">{renderPage()}</section>
+      </main>
+    </div>
+  );
+}
 
   // Nom à partir de first_name / last_name, sinon on retombe sur l'email
   const userName =
@@ -160,7 +211,7 @@ function App() {
       <aside className="sidebar">
         <div className="sidebar-logo">
           <div className="logo-mark" />
-          <span className="logo-text">NETWORK PRO</span>
+          <span className="logo-text">NETWORK PRO SERVICES</span>
         </div>
 
         <nav className="sidebar-nav">
