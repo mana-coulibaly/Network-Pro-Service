@@ -20,6 +20,25 @@ const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
 });
 
+// Gestion des erreurs de connexion
+pool.on('error', (err) => {
+    console.error('Erreur de connexion PostgreSQL:', err);
+});
+
+// Test de connexion au démarrage
+pool.query('SELECT NOW()')
+    .then(() => {
+        console.log('✓ Connexion à la base de données réussie');
+    })
+    .catch((err) => {
+        console.error('✗ Erreur de connexion à la base de données:', err.message);
+        console.error('Vérifiez que:');
+        console.error('  1. PostgreSQL est en cours d\'exécution');
+        console.error('  2. La base de données "db_network" existe');
+        console.error('  3. Les identifiants dans .env sont corrects');
+        console.error('  4. DATABASE_URL=' + process.env.DATABASE_URL);
+    });
+
 // petit healthcheck
 app.get('/', (_req, res) => res.send('API OK'));
 

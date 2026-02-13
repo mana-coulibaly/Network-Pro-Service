@@ -56,10 +56,10 @@ export default function Login({ onLogin }) {
     return (
         <div className="login-root">
         <div className="login-card">
-            <h1 className="logo-text" style={{ marginBottom: "1rem" }}>
+            <h1 className="logo-text">
             NETWORK PRO
             </h1>
-            <h2 style={{ marginBottom: "1rem" }}>Connexion</h2>
+            <h2>Connexion</h2>
 
             <form onSubmit={handleSubmit} className="login-form">
             <label>
@@ -70,6 +70,7 @@ export default function Login({ onLogin }) {
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 autoComplete="username"
+                placeholder="votre.email@example.com"
                 required
                 />
             </label>
@@ -82,6 +83,7 @@ export default function Login({ onLogin }) {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 autoComplete="current-password"
+                placeholder="••••••••"
                 required
                 />
             </label>
@@ -90,14 +92,13 @@ export default function Login({ onLogin }) {
                 type="submit"
                 className="primary-button"
                 disabled={loading}
-                style={{ marginTop: "0.75rem" }}
             >
                 {loading ? "Connexion..." : "Se connecter"}
             </button>
             </form>
 
             {error && (
-            <p style={{ marginTop: "0.75rem", color: "crimson" }}>{error}</p>
+            <p style={{ marginTop: "1rem" }}>{error}</p>
             )}
         </div>
         </div>

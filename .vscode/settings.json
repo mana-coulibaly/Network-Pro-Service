@@ -10,7 +10,7 @@
             },
             "driver": "PostgreSQL",
             "name": "postgreslocal",
-            "database": "appdb",
+            "database": "db_network",
             "username": "postgres",
             "password": "postgres"
         }
