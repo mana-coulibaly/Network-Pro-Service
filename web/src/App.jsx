@@ -6,33 +6,24 @@ import "./App.css";
 import Login from "./components/auth/Login.jsx";
 
 // Pages
-import CurrentCallsPage from "./components/pages/CurrentCallsPage.jsx";
-import HistoryPage from "./components/pages/HistoryPage.jsx";
-import NewTicketPage from "./components/pages/NewTicket.jsx";
-import ToolsPage from "./components/pages/Tools.jsx";
-import InventoryPage from "./components/pages/Inventory.jsx";
-import TimesheetPage from "./components/pages/Timesheet.jsx";
-import WorkorderPage from "./components/pages/Workorder.jsx";
-import InfoPage from "./components/pages/InfoPage.jsx";
-import ManagerTickets from "./components/pages/ManagerTickets.jsx";
-import AdminUsers from "./components/pages/AdminUsers.jsx";
+import { 
+  PAGES,
+  CurrentCallsPage,
+  HistoryPage,
+  NewTicketPage,
+  ToolsPage,
+  InventoryPage,
+  TimesheetPage,
+  WorkorderPage,
+  InfoPage,
+  ManagerTickets,
+  AdminUsers,
+} from "./components/pages";
 import ChangePassword from "./components/auth/ChangePassword.jsx";
 
 
 
-// Identifiants de pages
-const PAGES = {
-  CURRENT_CALLS: "current_calls",
-  HISTORY: "history",
-  NEW_TICKET: "new_ticket",
-  TOOLS: "tools",
-  INVENTORY: "inventory",
-  TIMESHEET: "timesheet",
-  WORKORDER: "workorder",
-  INFO: "info",
-  MANAGER_TICKETS: "manager_tickets",
-  ADMIN_USERS: "admin_users",
-};
+// Identifiants de pages (importés depuis components/pages)
 
 function App() {
   const [auth, setAuth] = useState({ user: null, token: null });
@@ -333,31 +324,7 @@ if (auth.user?.must_change_password || forcePwd) {
             </button>
           </div>
         </header>
-
-        {/* Cartes résumé (statiques pour l’instant) */}
-        <section className="summary-cards">
-          <div className="card">
-            <div className="card-title">Total Earnings</div>
-            <div className="card-value">$765K</div>
-            <div className="card-sub">This month</div>
-          </div>
-          <div className="card">
-            <div className="card-title">Total Photos Sold</div>
-            <div className="card-value">1.3K</div>
-            <div className="card-sub">From last month</div>
-          </div>
-          <div className="card">
-            <div className="card-title">Pending Payout</div>
-            <div className="card-value">$182</div>
-            <div className="card-sub">From last month</div>
-          </div>
-          <div className="card">
-            <div className="card-title">Paid Out</div>
-            <div className="card-value">$300</div>
-            <div className="card-sub">From last event</div>
-          </div>
-        </section>
-
+        
         {/* Zone de contenu : page active */}
         <section className="table-card">{renderPage(userRole)}</section>
       </main>

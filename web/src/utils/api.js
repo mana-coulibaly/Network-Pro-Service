@@ -29,13 +29,13 @@ export function clearSession() {
         credentials: "include", // important pour envoyer le cookie refresh
     });
 
-    const text = await res.text();
-    let data = null;
-    try {
-        data = text ? JSON.parse(text) : null;
-    } catch {
-        data = null;
-    }
+        const text = await res.text();
+        let data = null;
+        try {
+            data = text ? JSON.parse(text) : null;
+        } catch {
+            data = null;
+        }
 
     if (!res.ok) {
         clearSession();

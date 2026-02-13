@@ -822,7 +822,7 @@ app.get('/tickets', requireAuth, requirePasswordChanged,requireRole('tech'), asy
 
 // Punch (idempotent) sur un ticket
 // body: { punch_type, ts? }  (ts optionnel, ISO string; défaut = now)
-app.post('/tickets/:id/timestamps', requireAuth, requireRole('tech'), async (req, res) => {
+/* app.post('/tickets/:id/timestamps', requireAuth, requireRole('tech'), async (req, res) => {
     try {
         const { id } = req.params;
         const { punch_type, ts } = req.body || {};
@@ -862,7 +862,81 @@ app.post('/tickets/:id/timestamps', requireAuth, requireRole('tech'), async (req
         console.error(e);
         res.status(500).json({ error: 'fail_punch' });
     }
+}); */
+
+// Punch sur un ticket (idempotent "one-shot")
+// Si le punch existe déjà pour (ticket_id + punch_type), on ne modifie rien.
+// On renvoie quand même un OK (et le ts existant si tu veux).
+app.post("/tickets/:id/timestamps", requireAuth, requireRole("tech"), async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { punch_type } = req.body || {};
+
+        // 1) Validation du type de punch
+        const allowed = ["leave_home", "reach_wh", "start_site", "leave_site", "back_wh", "back_home"];
+        if (!allowed.includes(punch_type)) {
+        return res.status(400).json({ error: "punch_type invalide" });
+        }
+
+        // 2) Ownership : le ticket doit appartenir au tech connecté
+        const own = await pool.query(
+        `select 1 from tickets where id=$1 and tech_id=$2`,
+        [id, req.user.sub]
+        );
+        if (!own.rowCount) return res.status(403).json({ error: "Not your ticket" });
+
+        // 3) Timestamp serveur (pas celui du client)
+        const when = new Date().toISOString();
+
+        // 4) Insert "one-shot" : si déjà présent, DO NOTHING (donc aucun changement)
+        const ins = await pool.query(
+        `insert into ticket_timestamps(ticket_id, punch_type, ts)
+        values ($1,$2,$3)
+        on conflict (ticket_id, punch_type) do nothing
+        returning ts`,
+        [id, punch_type, when]
+        );
+
+        // 5) Si insert OK -> on a un ts (le nouveau)
+        if (ins.rowCount) {
+        // passer draft -> en_cours au premier punch (uniquement si on vient d'insérer)
+        await pool.query(
+            `update tickets
+            set ticket_status = 'en_cours'
+            where id = $1 and ticket_status = 'draft'`,
+            [id]
+        );
+
+        return res.json({
+            ok: true,
+            ticket_id: id,
+            punch_type,
+            ts: ins.rows[0].ts,
+            already_exists: false,
+        });
+        }
+
+        // 6) Si déjà existant -> on ne fait rien, mais on peut renvoyer le ts existant
+        const existing = await pool.query(
+        `select ts
+        from ticket_timestamps
+        where ticket_id=$1 and punch_type=$2`,
+        [id, punch_type]
+        );
+
+        return res.json({
+        ok: true,
+        ticket_id: id,
+        punch_type,
+        ts: existing.rows[0]?.ts || null,
+        already_exists: true, // utile côté front pour griser / message
+        });
+    } catch (e) {
+        console.error(e);
+        return res.status(500).json({ error: "fail_punch" });
+    }
 });
+
 
 
 
@@ -1184,9 +1258,6 @@ app.post('/tickets/:id/consumables', requireAuth, requireRole('tech'), async (re
         return res.status(500).json({ error: 'fail_add_consumable' });
     }
 });
-
-
-
 
 
 

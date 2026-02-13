@@ -161,50 +161,6 @@ export default function TicketDetail({ ticketId, onClose, onTicketUpdated }) {
         }
     }
 
-    /* function handleAddDraftPart(e) {
-        e.preventDefault();
-        if (isClosed) return;
-
-        setPartsError("");
-
-        if (!partAction) {
-        setPartsError("Veuillez choisir une action (Installed ou Replaced).");
-        return;
-        }
-        if (!partState) {
-        setPartsError("Veuillez choisir l'état (Neuf / Usagé / DOA).");
-        return;
-        }
-
-        const name = partName.trim();
-        const sn = serialNumber.trim();
-
-        if (!name) {
-        setPartsError("Le nom de la pièce est obligatoire.");
-        return;
-        }
-        if (!sn) {
-        setPartsError("Le numéro de série est obligatoire.");
-        return;
-        }
-
-        const newPart = {
-        part_action: partAction,
-        part_name: name,
-        serial_number: sn,
-        part_state: partState,
-        _localId: Date.now() + Math.random(),
-        };
-
-        setDraftParts((prev) => [...prev, newPart]);
-
-        // reset -> oblige à re-choisir
-        setPartName("");
-        setSerialNumber("");
-        setPartAction("");
-        setPartState("");
-    } */
-
     function handleAddDraftPart(e) {
         e.preventDefault();
         setPartsError("");
