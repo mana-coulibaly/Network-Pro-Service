@@ -6,7 +6,10 @@
   "scripts": {
     "dev": "nodemon index.js",
     "start": "node index.js",
-    "migrate": "node run-migration.js"
+    "migrate": "node run-migration.js",
+    "migrate:workflow": "node run-workflow-migration.js",
+    "migrate:odometer": "node run-odometer-migration.js",
+    "migrate:parts": "node run-parts-migration.js"
   },
   "keywords": [],
   "author": "",

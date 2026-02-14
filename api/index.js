@@ -1,5 +1,9 @@
 require('dotenv').config();
 
+// Imports pour le workflow strict
+const ticketWorkflow = require('./services/ticketWorkflow');
+const { updateTicketStateFromPunch, validateTicketCompletion } = require('./utils/workflowIntegration');
+
 // Vérification des variables d'environnement critiques
 if (!process.env.JWT_SECRET) {
     console.error('❌ ERREUR: JWT_SECRET n\'est pas défini dans les variables d\'environnement');
@@ -46,7 +50,9 @@ app.use(cors({
 }));
 
 //app.use(cors());
-app.use(express.json());
+// Augmenter la limite de taille pour permettre l'upload d'images en base64 (max 10MB)
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(cookieParser()); // pour mettre le refresh en cookie httpOnly
 
 
@@ -698,7 +704,82 @@ app.get('/manager/techs', requireAuth, requireRole('manager'), async (req, res) 
 });
 
 
-// Détail d’un tech + ses tickets (pour le manager)
+// Liste des tickets pour l'admin (même logique que manager)
+app.get('/admin/tickets', requireAuth, requirePasswordChanged, requireRole('admin'), async (req, res) => {
+    try {
+        let { status, tech_id, q, from, to, limit = '50', offset = '0' } = req.query;
+
+        const conds = [];
+        const params = [];
+        let i = 1;
+
+        if (status && status !== 'all') {
+        conds.push(`t.ticket_status = $${i}`);
+        params.push(status);
+        i++;
+        }
+
+        if (tech_id) {
+        conds.push(`t.tech_id = $${i}`);
+        params.push(tech_id);
+        i++;
+        }
+
+        if (from) {
+        conds.push(`t.created_at >= $${i}`);
+        params.push(from);
+        i++;
+        }
+
+        if (to) {
+        conds.push(`t.created_at <= $${i}`);
+        params.push(to);
+        i++;
+        }
+
+        if (q) {
+        conds.push(`(t.client_name ilike $${i} or t.site_name ilike $${i})`);
+        params.push(`%${q}%`);
+        i++;
+        }
+
+        const where = conds.length ? 'where ' + conds.join(' and ') : '';
+
+        limit = Math.min(parseInt(limit, 10) || 50, 100);
+        offset = Math.max(parseInt(offset, 10) || 0, 0);
+        params.push(limit, offset);
+
+        const { rows } = await pool.query(
+        `
+        select
+            t.id,
+            t.client_name,
+            t.site_name,
+            t.site_address,
+            t.ticket_status as status,
+            t.purpose,
+            t.created_at as "createdAt",
+            t.odo_start,
+            t.odo_end,
+            u.id   as tech_id,
+            u.email as tech_email
+        from tickets t
+        join users u on u.id = t.tech_id
+        ${where}
+        order by t.created_at desc
+        limit $${i} offset $${i + 1}
+        `,
+        params
+        );
+
+        res.json(rows);
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ error: 'fail_admin_list_tickets' });
+    }
+});
+
+// Détail d'un tech + ses tickets (pour le manager)
 app.get('/manager/techs/:id', requireAuth, requireRole('manager'), async (req, res) => {
     const { id } = req.params;
 
@@ -708,6 +789,43 @@ app.get('/manager/techs/:id', requireAuth, requireRole('manager'), async (req, r
         from users u
         left join tech_profiles p on p.user_id = u.id
         where u.id = $1 and u.role in ('tech','manager')`,
+        [id]
+    );
+    if (!userQ.rowCount) return res.status(404).json({ error: 'not found' });
+
+    const assetsQ = await pool.query(
+        `select id, asset_name, serial_number, active, created_at
+        from tech_assets
+        where tech_id = $1
+        order by created_at desc`,
+        [id]
+    );
+
+    const certsQ = await pool.query(
+        `select id, cert_name, expires_on, created_at
+        from tech_certifications
+        where tech_id = $1
+        order by expires_on nulls last, created_at desc`,
+        [id]
+    );
+
+    res.json({
+        tech: userQ.rows[0],
+        assets: assetsQ.rows,
+        certifications: certsQ.rows,
+    });
+});
+
+// Détail d'un employé/tech pour l'admin (même logique que manager mais accessible aux admins)
+app.get('/admin/employees/:id', requireAuth, requirePasswordChanged, requireRole('admin'), async (req, res) => {
+    const { id } = req.params;
+
+    const userQ = await pool.query(
+        `select u.id, u.email, u.role, u.is_active, u.first_name, u.last_name,
+                p.hourly_rate, p.km_rate, p.notes
+        from users u
+        left join tech_profiles p on p.user_id = u.id
+        where u.id = $1 and u.role in ('tech','team_lead','manager')`,
         [id]
     );
     if (!userQ.rowCount) return res.status(404).json({ error: 'not found' });
@@ -853,7 +971,7 @@ app.post('/tickets', requireAuth, requirePasswordChanged, requireRole('tech'), a
         }
         const { rows } = await pool.query(
         `insert into tickets(tech_id, client_name, site_name, site_address, ticket_status, purpose)
-        values ($1,$2,$3,$4,'draft',$5)
+        values ($1,$2,$3,$4,'CREATED',$5)
         returning id, client_name, site_name, site_address,
             ticket_status as status, purpose, created_at as "createdAt"`,
         [req.user.sub, client_name, site_name, site_address, purpose ?? null]
@@ -861,8 +979,16 @@ app.post('/tickets', requireAuth, requirePasswordChanged, requireRole('tech'), a
         res.json(rows[0]);
     }
     catch (e) {
-        console.error(e);
-        res.status(500).json({ error: 'fail_create_ticket' });
+        console.error('create ticket error:', e);
+        if (e.code) {
+            console.error('PostgreSQL error code:', e.code);
+            console.error('Error detail:', e.detail);
+        }
+        // En développement, on peut renvoyer plus de détails
+        const errorMessage = process.env.NODE_ENV === 'production' 
+            ? 'fail_create_ticket' 
+            : (e.message || 'fail_create_ticket') + (e.code ? ` (${e.code})` : '');
+        res.status(500).json({ error: errorMessage });
     }
 });
 
@@ -891,7 +1017,9 @@ app.get('/tickets', requireAuth, requirePasswordChanged,requireRole('tech'), asy
 
 
 // Punch (idempotent) sur un ticket
-// body: { punch_type, ts? }  (ts optionnel, ISO string; défaut = now)
+// body: { punch_type, odo_value?, odo_image? }  
+// - odo_value: valeur de l'odomètre (requis pour leave_home et back_home)
+// - odo_image: URL/base64 de l'image de l'odomètre (optionnel)
 /* app.post('/tickets/:id/timestamps', requireAuth, requireRole('tech'), async (req, res) => {
     try {
         const { id } = req.params;
@@ -945,64 +1073,96 @@ app.post("/tickets/:id/timestamps", requireAuth, requireRole("tech"), async (req
         // 1) Validation du type de punch
         const allowed = ["leave_home", "reach_wh", "start_site", "leave_site", "back_wh", "back_home"];
         if (!allowed.includes(punch_type)) {
-        return res.status(400).json({ error: "punch_type invalide" });
+            return res.status(400).json({ error: "punch_type invalide" });
         }
 
         // 2) Ownership : le ticket doit appartenir au tech connecté
         const own = await pool.query(
-        `select 1 from tickets where id=$1 and tech_id=$2`,
-        [id, req.user.sub]
+            `select ticket_status from tickets where id=$1 and tech_id=$2`,
+            [id, req.user.sub]
         );
         if (!own.rowCount) return res.status(403).json({ error: "Not your ticket" });
 
-        // 3) Timestamp serveur (pas celui du client)
+        const currentState = own.rows[0].ticket_status;
+
+        // 3) Validation du workflow : vérifier si le punch est autorisé
+        const validation = ticketWorkflow.canPerformPunch(currentState, punch_type);
+        if (!validation.valid) {
+            return res.status(409).json({ error: validation.error });
+        }
+
+        // 4) Timestamp serveur (pas celui du client)
         const when = new Date().toISOString();
 
-        // 4) Insert "one-shot" : si déjà présent, DO NOTHING (donc aucun changement)
+        // 5) Insert "one-shot" : si déjà présent, DO NOTHING
         const ins = await pool.query(
-        `insert into ticket_timestamps(ticket_id, punch_type, ts)
-        values ($1,$2,$3)
-        on conflict (ticket_id, punch_type) do nothing
-        returning ts`,
-        [id, punch_type, when]
+            `insert into ticket_timestamps(ticket_id, punch_type, ts)
+            values ($1,$2,$3)
+            on conflict (ticket_id, punch_type) do nothing
+            returning ts`,
+            [id, punch_type, when]
         );
 
-        // 5) Si insert OK -> on a un ts (le nouveau)
+        // 6) Si insert OK -> mettre à jour l'état du ticket selon le workflow
         if (ins.rowCount) {
-        // passer draft -> en_cours au premier punch (uniquement si on vient d'insérer)
-        await pool.query(
-            `update tickets
-            set ticket_status = 'en_cours'
-            where id = $1 and ticket_status = 'draft'`,
-            [id]
+            // Mettre à jour l'état selon le workflow
+            const result = await updateTicketStateFromPunch(pool, id, punch_type);
+            
+            if (!result.success) {
+                // Rollback du timestamp si la mise à jour d'état échoue
+                await pool.query(
+                    `DELETE FROM ticket_timestamps WHERE ticket_id=$1 AND punch_type=$2`,
+                    [id, punch_type]
+                );
+                return res.status(409).json({ error: result.error });
+            }
+
+            // 7) Capture automatique de l'odomètre lors des punches spécifiques
+            // Note: L'odomètre sera demandé via l'interface, mais on peut préparer l'endpoint
+            // pour accepter odo_value et odo_image dans le body si fournis
+            const { odo_value, odo_image } = req.body || {};
+            if (odo_value !== undefined && !isNaN(parseInt(odo_value))) {
+                if (punch_type === 'leave_home') {
+                    // Odomètre de départ
+                    await pool.query(
+                        `UPDATE tickets SET odo_start = $1, odo_start_image = $2 WHERE id = $3`,
+                        [parseInt(odo_value), odo_image || null, id]
+                    );
+                } else if (punch_type === 'back_home') {
+                    // Odomètre d'arrivée
+                    await pool.query(
+                        `UPDATE tickets SET odo_end = $1, odo_end_image = $2 WHERE id = $3`,
+                        [parseInt(odo_value), odo_image || null, id]
+                    );
+                }
+            }
+
+            return res.json({
+                ok: true,
+                ticket_id: id,
+                punch_type,
+                ts: ins.rows[0].ts,
+                new_state: result.newState,
+                already_exists: false,
+            });
+        }
+
+        // 7) Si déjà existant -> renvoyer le ts existant
+        const existing = await pool.query(
+            `select ts from ticket_timestamps
+            where ticket_id=$1 and punch_type=$2`,
+            [id, punch_type]
         );
 
         return res.json({
             ok: true,
             ticket_id: id,
             punch_type,
-            ts: ins.rows[0].ts,
-            already_exists: false,
-        });
-        }
-
-        // 6) Si déjà existant -> on ne fait rien, mais on peut renvoyer le ts existant
-        const existing = await pool.query(
-        `select ts
-        from ticket_timestamps
-        where ticket_id=$1 and punch_type=$2`,
-        [id, punch_type]
-        );
-
-        return res.json({
-        ok: true,
-        ticket_id: id,
-        punch_type,
-        ts: existing.rows[0]?.ts || null,
-        already_exists: true, // utile côté front pour griser / message
+            ts: existing.rows[0]?.ts || null,
+            already_exists: true,
         });
     } catch (e) {
-        console.error(e);
+        console.error("punch error:", e);
         return res.status(500).json({ error: "fail_punch" });
     }
 });
@@ -1018,7 +1178,7 @@ app.get('/tickets/:id', requireAuth, requireRole('tech'), async (req, res) => {
     const t = await pool.query(
         `select id, client_name, site_name, site_address,
                 ticket_status as status, purpose, created_at as "createdAt",
-                odo_start, odo_end, description
+                odo_start, odo_end, odo_start_image, odo_end_image, description
         from tickets
         where id=$1 and tech_id=$2`,
         [id, req.user.sub]
@@ -1036,7 +1196,7 @@ app.get('/tickets/:id', requireAuth, requireRole('tech'), async (req, res) => {
 
     // parts
     const parts = await pool.query(
-        `select id, part_action, part_name, serial_number, part_state, created_at
+        `select id, part_action, part_name, serial_number, part_state, serial_number_image, created_at
         from ticket_parts
         where ticket_id=$1
         order by created_at asc`,
@@ -1052,11 +1212,16 @@ app.get('/tickets/:id', requireAuth, requireRole('tech'), async (req, res) => {
         [id]
     );
 
+    // Calcul des temps de trajet et de travail
+    const timeCalculations = require('./utils/timeCalculations');
+    const timeSegments = timeCalculations.getFormattedTimeSegments(p.rows);
+
     res.json({
         ticket: t.rows[0],
         timestamps: p.rows,
         parts: parts.rows,
         consumables: cons.rows,
+        timeSegments: timeSegments,
     });
 });
 
@@ -1064,9 +1229,10 @@ app.get('/tickets/:id', requireAuth, requireRole('tech'), async (req, res) => {
 
 // Punch (idempotent) sur un ticket
 // body: { punch_type, ts? }  punch_type ∈ leave_home|reach_wh|start_site|leave_site|back_wh|back_home
+// Mise à jour manuelle de l'odomètre (pour compatibilité)
 app.post('/tickets/:id/odometer', requireAuth, requireRole('tech'), async (req, res) => {
     const { id } = req.params;
-    const { odo_start, odo_end } = req.body || {};
+    const { odo_start, odo_end, odo_start_image, odo_end_image } = req.body || {};
 
     // ownership
     const own = await pool.query(
@@ -1086,109 +1252,77 @@ app.post('/tickets/:id/odometer', requireAuth, requireRole('tech'), async (req, 
     const upd = await pool.query(
         `update tickets
             set odo_start = coalesce($1, odo_start),
-                odo_end   = coalesce($2, odo_end)
-        where id=$3
+                odo_end   = coalesce($2, odo_end),
+                odo_start_image = coalesce($3, odo_start_image),
+                odo_end_image = coalesce($4, odo_end_image)
+        where id=$5
         returning id, client_name, site_name, site_address,
                 ticket_status as status, purpose, created_at as "createdAt",
-                odo_start, odo_end`,
-        [odo_start ?? null, odo_end ?? null, id]
+                odo_start, odo_end, odo_start_image, odo_end_image`,
+        [odo_start ?? null, odo_end ?? null, odo_start_image ?? null, odo_end_image ?? null, id]
     );
     res.json(upd.rows[0]);
 });
 
 
 app.patch('/tickets/:id/status', requireAuth, requireRole('tech'), async (req, res) => {
-    const { id } = req.params;
-    const { status, description } = req.body || {};   // <- on récupère aussi description
-    const allowed = ['en_cours', 'clos'];
-    if (!allowed.includes(status)) {
-        return res.status(400).json({ error: 'status invalide' });
-    }
+    try {
+        const { id } = req.params;
+        const { status, description } = req.body || {};
 
-    // Lire le statut courant + odomètre
-    const q = await pool.query(
-        `select ticket_status, odo_start, odo_end
-        from tickets
-        where id=$1 and tech_id=$2`,
-        [id, req.user.sub]
-    );
-    if (!q.rowCount) return res.status(404).json({ error: 'not found' });
-
-    const { ticket_status: current, odo_start, odo_end } = q.rows[0];
-
-    // description obligatoire pour 'clos'
-    if (status === 'clos' && !description) {
-        return res.status(409).json({ error: 'Impossible de clore: description obligatoire' });
-    }
-
-    // Règles de transition
-    const okTransition =
-        (current === 'draft'    && status === 'en_cours') ||
-        (current === 'en_cours' && status === 'clos');
-    if (!okTransition) {
-        return res.status(409).json({ error: `transition interdite: ${current} -> ${status}` });
-    }
-
-    // si on veut clore, vérifier les prérequis
-    if (status === 'clos') {
-        // 1) odomètre complet
-        if (odo_start == null || odo_end == null) {
-            return res.status(409).json({ error: 'Impossible de clore: odomètre incomplet' });
+        // Seul COMPLETED est autorisé via cet endpoint
+        if (status !== 'COMPLETED') {
+            return res.status(400).json({ error: 'Seul le statut COMPLETED peut être défini via cet endpoint' });
         }
 
-        // 2) timestamps requis (reach_wh, start_site, leave_site, back_wh)
-        const needed = ['reach_wh','start_site','leave_site','back_wh'];
-        const tsq = await pool.query(
-            `select punch_type from ticket_timestamps
-            where ticket_id=$1 and punch_type = any($2::text[])`,
-            [id, needed]
+        // Ownership
+        const q = await pool.query(
+            `select ticket_status, odo_start, odo_end, description
+            from tickets
+            where id=$1 and tech_id=$2`,
+            [id, req.user.sub]
         );
-        const present = new Set(tsq.rows.map(r => r.punch_type));
-        const missing = needed.filter(t => !present.has(t));
-        if (missing.length) {
-            return res.status(409).json({ error: `Impossible de clore: timestamps manquants (${missing.join(', ')})` });
+        if (!q.rowCount) return res.status(404).json({ error: 'not found' });
+
+        // Validation du workflow et des prérequis
+        // Passer la description du body si fournie pour la validation
+        const validation = await validateTicketCompletion(pool, id, description);
+        if (!validation.valid) {
+            return res.status(409).json({ 
+                error: validation.error,
+                missing: validation.missing 
+            });
         }
 
-        // 3) pièces requises: au moins 1 installed et 1 replaced
-
+        // Vérifier les pièces (au moins une pièce ou "Aucune pièce")
         const pq = await pool.query(
-        `select count(*)::int as n
-        from ticket_parts
-        where ticket_id=$1`,
-        [id]
+            `select count(*)::int as n
+            from ticket_parts
+            where ticket_id=$1`,
+            [id]
         );
 
         if (pq.rows[0].n === 0) {
-        return res.status(409).json({ error: 'Impossible de clore: ajoutez une pièce ou "Aucune pièce"' });
+            return res.status(409).json({ error: 'Impossible de compléter: ajoutez une pièce ou "Aucune pièce"' });
         }
 
-
-        /* const pq = await pool.query(
-            `select part_action, count(*) from ticket_parts
-            where ticket_id=$1 and part_action in ('installed','replaced')
-            group by part_action`,
-            [id]
+        // Mettre à jour le ticket avec COMPLETED et la description
+        const upd = await pool.query(
+            `update tickets
+            set ticket_status = 'COMPLETED',
+                description = coalesce($1, description)
+            where id = $2
+            returning id, client_name, site_name, site_address,
+                    ticket_status as status, purpose, created_at as "createdAt",
+                    odo_start, odo_end, description`,
+            [description ?? null, id]
         );
-        const counts = Object.fromEntries(pq.rows.map(r => [r.part_action, Number(r.count)]));
-        if (!counts.installed || !counts.replaced) {
-            return res.status(409).json({
-                error: 'Impossible de clore: il faut au moins une pièce "installed" (nouvelle) et une pièce "replaced" (ancienne).'
-            });
-        } */
 
+        res.json(upd.rows[0]);
+    } catch (e) {
+        console.error("complete ticket error:", e);
+        res.status(500).json({ error: "fail_complete_ticket" });
     }
-
-    const upd = await pool.query(
-        `update tickets
-            set ticket_status = $1,
-                description   = coalesce($2, description)   -- <- bonne colonne
-        where id = $3
-        returning id, client_name, site_name, site_address,
-                ticket_status as status, purpose, created_at as "createdAt",
-                odo_start, odo_end, description`,
-        [status, description ?? null, id]
-    );
-    res.json(upd.rows[0]);
 });
 
 
@@ -1196,10 +1330,10 @@ app.patch('/tickets/:id/status', requireAuth, requireRole('tech'), async (req, r
 // Endpoints parts
 
 // Ajouter une pièce à un ticket
-// body: { part_action, part_name, serial_number, part_state }
+// body: { part_action, part_name, serial_number, part_state, serial_number_image? }
 app.post('/tickets/:id/parts', requireAuth, requireRole('tech'), async (req, res) => {
     const { id } = req.params;
-    const { part_action, part_name, serial_number, part_state } = req.body || {};
+    const { part_action, part_name, serial_number, part_state, serial_number_image } = req.body || {};
 
     // ownership
     const own = await pool.query(
@@ -1220,10 +1354,10 @@ app.post('/tickets/:id/parts', requireAuth, requireRole('tech'), async (req, res
     if (part_action === 'none') {
         try {
         const { rows } = await pool.query(
-            `insert into ticket_parts(ticket_id, part_action, part_name, serial_number, part_state)
-            values ($1,$2,$3,$4,$5)
-            returning id, ticket_id, part_action, part_name, serial_number, part_state, created_at`,
-            [id, 'none', 'Aucune pièce utilisée', null, null]
+            `insert into ticket_parts(ticket_id, part_action, part_name, serial_number, part_state, serial_number_image)
+            values ($1,$2,$3,$4,$5,$6)
+            returning id, ticket_id, part_action, part_name, serial_number, part_state, serial_number_image, created_at`,
+            [id, 'none', 'Aucune pièce utilisée', null, null, null]
         );
         return res.json(rows[0]);
         } catch (e) {
@@ -1248,10 +1382,10 @@ app.post('/tickets/:id/parts', requireAuth, requireRole('tech'), async (req, res
 
     try {
         const { rows } = await pool.query(
-        `insert into ticket_parts(ticket_id, part_action, part_name, serial_number, part_state)
-        values ($1,$2,$3,$4,$5)
-        returning id, ticket_id, part_action, part_name, serial_number, part_state, created_at`,
-        [id, part_action, part_name.trim(), sn, part_state]
+            `insert into ticket_parts(ticket_id, part_action, part_name, serial_number, part_state, serial_number_image)
+            values ($1,$2,$3,$4,$5,$6)
+            returning id, ticket_id, part_action, part_name, serial_number, part_state, serial_number_image, created_at`,
+            [id, part_action, part_name.trim(), sn, part_state, serial_number_image || null]
         );
         res.json(rows[0]);
     } catch (e) {
@@ -1271,7 +1405,7 @@ app.get('/tickets/:id/parts', requireAuth, requireRole('tech'), async (req, res)
     if (!own.rowCount) return res.status(404).json({ error: 'not found' });
 
     const { rows } = await pool.query(
-        `select id, part_action, part_name, serial_number, part_state, created_at
+        `select id, part_action, part_name, serial_number, part_state, serial_number_image, created_at
         from ticket_parts
         where ticket_id=$1
         order by created_at asc`,
@@ -1330,6 +1464,58 @@ app.post('/tickets/:id/consumables', requireAuth, requireRole('tech'), async (re
 });
 
 
+
+// Endpoint pour récupérer le profil de l'utilisateur connecté
+app.get('/auth/me', requireAuth, async (req, res) => {
+    try {
+        const { rows } = await pool.query(
+            `select id, email, role, first_name, last_name,
+                    created_at, coalesce(is_active,true) as is_active,
+                    coalesce(must_change_password,false) as must_change_password,
+                    password_changed_at
+            from users
+            where id=$1`,
+            [req.user.sub]
+        );
+        
+        if (!rows.length) {
+            return res.status(404).json({ error: 'user not found' });
+        }
+        
+        res.json(rows[0]);
+    } catch (e) {
+        console.error('get profile error:', e);
+        res.status(500).json({ error: 'fail_get_profile' });
+    }
+});
+
+// Endpoint pour mettre à jour le profil (nom, prénom)
+app.patch('/auth/me', requireAuth, async (req, res) => {
+    try {
+        const { first_name, last_name } = req.body || {};
+        
+        const { rows } = await pool.query(
+            `update users
+            set first_name = coalesce($1, first_name),
+                last_name = coalesce($2, last_name)
+            where id=$3
+            returning id, email, role, first_name, last_name,
+                    created_at, coalesce(is_active,true) as is_active,
+                    coalesce(must_change_password,false) as must_change_password,
+                    password_changed_at`,
+            [first_name || null, last_name || null, req.user.sub]
+        );
+        
+        if (!rows.length) {
+            return res.status(404).json({ error: 'user not found' });
+        }
+        
+        res.json(rows[0]);
+    } catch (e) {
+        console.error('update profile error:', e);
+        res.status(500).json({ error: 'fail_update_profile' });
+    }
+});
 
 app.listen(process.env.PORT || 3000, () => {
     console.log('API listening on http://localhost:' + (process.env.PORT || 3000));

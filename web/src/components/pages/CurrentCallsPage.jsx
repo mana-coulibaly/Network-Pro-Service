@@ -21,9 +21,11 @@ export default function CurrentCallsPage() {
 
         const list = await api("/tickets?mine=1");
 
-        // ne garder que les tickets en cours ou brouillon
+        // ne garder que les tickets actifs (non complétés)
+        // Inclut les nouveaux statuts du workflow : CREATED, LEFT_HOME, WAREHOUSE_ARRIVED, etc.
+        // et les anciens statuts pour rétrocompatibilité : draft, en_cours
         const actifs = (list || []).filter(
-            (t) => t.status === "en_cours" || t.status === "draft"
+            (t) => t.status !== "COMPLETED" && t.status !== "clos"
         );
 
         setTickets(actifs);
@@ -51,7 +53,7 @@ export default function CurrentCallsPage() {
         );
         // on applique le même filtre qu'au chargement :
         return remplacés.filter(
-            (t) => t.status === "en_cours" || t.status === "draft"
+            (t) => t.status !== "COMPLETED" && t.status !== "clos"
         );
         });
     }

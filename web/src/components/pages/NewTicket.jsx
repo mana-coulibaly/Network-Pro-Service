@@ -2,7 +2,7 @@
 import { useState } from "react";
 import { api } from "../../utils/api";
 
-export default function NewTicketPage() {
+export default function NewTicketPage({ onTicketCreated }) {
     const [form, setForm] = useState({
         client_name: "",
         site_name: "",
@@ -39,6 +39,7 @@ export default function NewTicketPage() {
         });
 
         setSuccess("Ticket créé avec succès.");
+        
         // reset du formulaire
         setForm({
             client_name: "",
@@ -48,6 +49,14 @@ export default function NewTicketPage() {
         });
 
         console.log("Ticket créé :", created);
+        
+        // Appeler le callback pour rediriger vers "Appels en cours"
+        if (onTicketCreated) {
+            // Petit délai pour que l'utilisateur voie le message de succès
+            setTimeout(() => {
+                onTicketCreated(created);
+            }, 1000);
+        }
         } catch (e) {
         console.error(e);
         setError(e.message || "Erreur lors de la création du ticket.");
@@ -63,88 +72,75 @@ export default function NewTicketPage() {
         </div>
 
         <div className="table-wrapper">
-            <form
-            onSubmit={handleSubmit}
-            className="new-ticket-form"
-            style={{
-                display: "flex",
-                flexDirection: "column",
-                gap: "0.75rem",
-                maxWidth: "600px",
-            }}
-            >
-            <div>
-                <label className="label">
-                Client
-                <input
-                    name="client_name"
-                    className="input"
-                    value={form.client_name}
-                    onChange={handleChange}
-                    placeholder="Nom du client"
-                    required
-                />
-                </label>
-            </div>
+            <form onSubmit={handleSubmit} className="new-ticket-form">
+                <div className="form-group">
+                    <label htmlFor="client_name">Client</label>
+                    <input
+                        id="client_name"
+                        name="client_name"
+                        className="input"
+                        value={form.client_name}
+                        onChange={handleChange}
+                        placeholder="Nom du client"
+                        required
+                    />
+                </div>
 
-            <div>
-                <label className="label">
-                Site
-                <input
-                    name="site_name"
-                    className="input"
-                    value={form.site_name}
-                    onChange={handleChange}
-                    placeholder="Nom du site"
-                    required
-                />
-                </label>
-            </div>
+                <div className="form-group">
+                    <label htmlFor="site_name">Site</label>
+                    <input
+                        id="site_name"
+                        name="site_name"
+                        className="input"
+                        value={form.site_name}
+                        onChange={handleChange}
+                        placeholder="Nom du site"
+                        required
+                    />
+                </div>
 
-            <div>
-                <label className="label">
-                Adresse du site
-                <input
-                    name="site_address"
-                    className="input"
-                    value={form.site_address}
-                    onChange={handleChange}
-                    placeholder="Adresse complète"
-                    required
-                />
-                </label>
-            </div>
+                <div className="form-group">
+                    <label htmlFor="site_address">Adresse du site</label>
+                    <input
+                        id="site_address"
+                        name="site_address"
+                        className="input"
+                        value={form.site_address}
+                        onChange={handleChange}
+                        placeholder="Adresse complète"
+                        required
+                    />
+                </div>
 
-            <div>
-                <label className="label">
-                But de la visite
-                <textarea
-                    name="purpose"
-                    className="input"
-                    style={{ minHeight: "80px", resize: "vertical" }}
-                    value={form.purpose}
-                    onChange={handleChange}
-                    placeholder="Ex: Remplacement d’un POS, problème réseau…"
-                />
-                </label>
-            </div>
+                <div className="form-group">
+                    <label htmlFor="purpose">But de la visite</label>
+                    <textarea
+                        id="purpose"
+                        name="purpose"
+                        className="input"
+                        value={form.purpose}
+                        onChange={handleChange}
+                        placeholder="Ex: Remplacement d'un POS, problème réseau…"
+                    />
+                </div>
 
-            <div style={{ marginTop: "0.5rem" }}>
-                <button
-                type="submit"
-                className="primary-button"
-                disabled={loading}
-                >
-                {loading ? "Création en cours..." : "Créer le ticket"}
-                </button>
-            </div>
+                <div style={{ marginTop: "8px" }}>
+                    <button
+                        type="submit"
+                        className="primary-button"
+                        disabled={loading}
+                        style={{ width: "100%" }}
+                    >
+                        {loading ? "Création en cours..." : "Créer le ticket"}
+                    </button>
+                </div>
 
-            {error && (
-                <p style={{ color: "crimson", marginTop: "0.25rem" }}>{error}</p>
-            )}
-            {success && (
-                <p style={{ color: "green", marginTop: "0.25rem" }}>{success}</p>
-            )}
+                {error && (
+                    <div className="form-message error">{error}</div>
+                )}
+                {success && (
+                    <div className="form-message success">{success}</div>
+                )}
             </form>
         </div>
         </>
