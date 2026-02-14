@@ -1,4 +1,19 @@
 require('dotenv').config();
+
+// Vérification des variables d'environnement critiques
+if (!process.env.JWT_SECRET) {
+    console.error('❌ ERREUR: JWT_SECRET n\'est pas défini dans les variables d\'environnement');
+    console.error('   Créez un fichier .env dans le dossier api/ avec JWT_SECRET=votre_secret');
+    console.error('   Pour générer un secret: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"');
+    process.exit(1);
+}
+
+if (!process.env.DATABASE_URL) {
+    console.error('❌ ERREUR: DATABASE_URL n\'est pas défini dans les variables d\'environnement');
+    console.error('   Créez un fichier .env dans le dossier api/ avec DATABASE_URL=postgresql://...');
+    process.exit(1);
+}
+
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcrypt');
@@ -8,8 +23,27 @@ const cookieParser = require('cookie-parser');
 const { Pool } = require('pg');
 const app = express();
 
-// CORS pour le dev local (Vite sur :5173)
-app.use(cors({ origin: 'http://localhost:5173', credentials: true }));
+// CORS pour le dev local (Vite sur :5173 ou autre port)
+const allowedOrigins = [
+    'http://localhost:5173',
+    'http://localhost:3000',
+    'http://localhost:5174',
+    process.env.FRONTEND_URL
+].filter(Boolean);
+
+app.use(cors({ 
+    origin: function (origin, callback) {
+        // Permettre les requêtes sans origin (comme Postman, curl, etc.)
+        if (!origin) return callback(null, true);
+        if (allowedOrigins.includes(origin)) {
+            callback(null, true);
+        } else {
+            console.warn('CORS: origine non autorisée:', origin);
+            callback(null, true); // En dev, on autorise tout pour faciliter le debug
+        }
+    },
+    credentials: true 
+}));
 
 //app.use(cors());
 app.use(express.json());
@@ -44,9 +78,15 @@ pool.query('SELECT NOW()')
 app.get('/', (_req, res) => res.send('API OK'));
 
 function signAccess(payload) {
+    if (!process.env.JWT_SECRET) {
+        throw new Error('JWT_SECRET n\'est pas défini dans les variables d\'environnement');
+    }
     return jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: process.env.JWT_EXPIRES || '15m' });
 }
 function signRefresh(payload) {
+    if (!process.env.JWT_SECRET) {
+        throw new Error('JWT_SECRET n\'est pas défini dans les variables d\'environnement');
+    }
     return jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: process.env.REFRESH_EXPIRES || '30d' });
 }
 
@@ -127,7 +167,18 @@ app.post("/auth/login", async (req, res) => {
         });
     } catch (err) {
         console.error("login error:", err);
-        res.status(500).json({ error: "fail_login" });
+        console.error("Stack:", err.stack);
+        // Afficher plus de détails sur l'erreur SQL si c'est une erreur de base de données
+        if (err.code) {
+            console.error("Code d'erreur PostgreSQL:", err.code);
+            console.error("Détails:", err.detail);
+            console.error("Message:", err.message);
+        }
+        // En développement, on peut renvoyer plus de détails
+        const errorMessage = process.env.NODE_ENV === 'production' 
+            ? "fail_login" 
+            : (err.message || "fail_login") + (err.code ? ` (${err.code})` : '');
+        res.status(500).json({ error: errorMessage });
     }
 });
 
